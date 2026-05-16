@@ -1,8 +1,11 @@
-name: RSS Only Professional News Video
+name: RSS News Video To Telegram Every Hour
 
 on:
   schedule:
+    # Runs every hour
     - cron: "0 * * * *"
+
+  # Allows manual run from GitHub Actions
   workflow_dispatch:
 
 permissions:
@@ -18,10 +21,10 @@ jobs:
       MAX_VIDEOS_PER_RUN: "1"
       VIDEO_SECONDS_MIN: "35"
       VIDEO_SECONDS_MAX: "55"
-
-      # true = use image from RSS item when available
-      # false = safest copyright mode, generated background only
       USE_RSS_IMAGES: "true"
+
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
       - name: Checkout repository
@@ -49,14 +52,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run RSS news video bot
+      - name: Create RSS news video
         run: |
           python bot.py
 
-      - name: Upload created videos
+      - name: Send video to Telegram
+        run: |
+          python telegram_upload.py
+
+      - name: Upload video artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rss-news-videos
+          name: rss-news-video
           path: |
             output/*.mp4
             output/*.json
