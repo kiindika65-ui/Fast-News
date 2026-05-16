@@ -23,6 +23,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Fix output path
+        run: |
+          if [ -f output ]; then
+            rm output
+          fi
+          mkdir -p output
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -55,5 +62,5 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add state.json output/*.json || true
-          git commit -m "Update used news state" || echo "No changes"
+          git commit -m "Update used news state" || echo "No changes to commit"
           git push || true
