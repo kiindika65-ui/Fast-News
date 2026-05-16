@@ -57,7 +57,20 @@ BANNED_TITLE_WORDS = [
     "newsletter",
 ]
 
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# ===================== FIX OUTPUT FOLDER ERROR =====================
+
+def prepare_folders():
+    """
+    Fixes this error:
+    FileExistsError: [Errno 17] File exists: 'output'
+
+    That happens when 'output' exists as a file, not a folder.
+    """
+    if OUTPUT_DIR.exists() and not OUTPUT_DIR.is_dir():
+        OUTPUT_DIR.unlink()
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ===================== STATE =====================
@@ -68,11 +81,13 @@ def load_state() -> dict:
             return json.loads(STATE_FILE.read_text(encoding="utf-8"))
         except Exception:
             return {"used": []}
+
     return {"used": []}
 
 
 def save_state(state: dict) -> None:
     state["used"] = state.get("used", [])[-MAX_OLD_ITEMS:]
+
     STATE_FILE.write_text(
         json.dumps(state, indent=2, ensure_ascii=False),
         encoding="utf-8"
@@ -100,7 +115,7 @@ def source_from_entry(entry) -> str:
     if not source:
         link = getattr(entry, "link", "")
         host = urlparse(link).netloc.replace("www.", "")
-        source = host.split(".")[0].title() if host else "news sources"
+        source = host.split(".")[0].title() if host else "RSS News"
 
     return clean_text(source)[:40]
 
@@ -113,13 +128,10 @@ def item_id(title: str, link: str) -> str:
 def is_good_item(title: str, summary: str) -> bool:
     title_lower = title.lower()
 
-    if len(title) < 25 or len(title) > 180:
+    if len(title) < 25 or len(title) > 190:
         return False
 
     if any(word in title_lower for word in BANNED_TITLE_WORDS):
-        return False
-
-    if title.count("-") > 4:
         return False
 
     return True
@@ -138,8 +150,9 @@ def fetch_items() -> list[dict]:
 
     for feed_url in feeds:
         try:
-            raw = requests.get(feed_url, headers=headers, timeout=20).content
-            parsed = feedparser.parse(raw)
+            response = requests.get(feed_url, headers=headers, timeout=20)
+            response.raise_for_status()
+            parsed = feedparser.parse(response.content)
         except Exception as e:
             print(f"Feed failed: {feed_url} -> {e}")
             continue
@@ -196,23 +209,16 @@ def pick_new_items(items: list[dict], state: dict, count: int) -> list[dict]:
 # ===================== ORIGINAL SCRIPT =====================
 
 def make_original_script(item: dict) -> str:
-    """
-    Creates an original narration from RSS metadata only.
-    It does not copy full articles.
-    """
-
     title = item["title"].strip(" .")
     summary = item.get("summary", "").strip(" .")
-    source = item.get("source", "a news source")
+    source = item.get("source", "RSS news source")
 
-    # Google News titles often look like:
-    # "Headline - Source"
     if " - " in title:
         possible_headline, possible_source = title.rsplit(" - ", 1)
-        if 12 <= len(possible_headline) <= 140:
+
+        if 12 <= len(possible_headline) <= 150:
             title = possible_headline.strip()
-            if not source or source == "News":
-                source = possible_source.strip()
+            source = possible_source.strip() or source
 
     short_summary = summary
 
@@ -224,12 +230,14 @@ def make_original_script(item: dict) -> str:
         "A new headline is developing in U.S. news today.",
         "Here is one of the latest stories people are following right now.",
         "This is a quick news brief from World Pulse Daily.",
+        "A new update is now appearing across major news feeds.",
     ]
 
-    middle = [
+    middles = [
         f"Reports from {source} point to this main development: {title}.",
         f"The central update is this: {title}.",
         f"According to the latest RSS update from {source}, the story is about {title}.",
+        f"The headline now getting attention is: {title}.",
     ]
 
     context = ""
@@ -241,9 +249,10 @@ def make_original_script(item: dict) -> str:
         "More details may change as officials and reporters update the story.",
         "We will keep watching for verified updates as this develops.",
         "Follow reliable sources before making conclusions, because breaking stories can change quickly.",
+        "This is a developing update, and more verified information may come later.",
     ]
 
-    script = f"{random.choice(openers)} {random.choice(middle)}{context} {random.choice(closers)}"
+    script = f"{random.choice(openers)} {random.choice(middles)}{context} {random.choice(closers)}"
     script = re.sub(r"\s+", " ", script).strip()
 
     words = script.split()
@@ -263,10 +272,11 @@ async def make_voice(text: str, out_mp3: Path) -> None:
         rate="+3%",
         volume="+0%"
     )
+
     await communicate.save(str(out_mp3))
 
 
-# ===================== VIDEO DESIGN =====================
+# ===================== VIDEO HELPERS =====================
 
 def get_font(size: int, bold: bool = False):
     candidates = [
@@ -303,6 +313,7 @@ def wrap_lines(text: str, font, max_width: int) -> list[str]:
         else:
             if line:
                 lines.append(line)
+
             line = word
 
     if line:
@@ -443,7 +454,7 @@ def make_frame_builder(item: dict, script: str, duration: float):
             fill=(255, 210, 90, 255)
         )
 
-        # Headline panel
+        # Headline box
         draw_round_rect(
             draw,
             (60, 255, 1020, 760),
@@ -464,7 +475,6 @@ def make_frame_builder(item: dict, script: str, duration: float):
             )
             y += 72
 
-        # Source
         source_text = f"Source: {item.get('source', 'RSS update')}"
 
         draw.text(
@@ -474,7 +484,7 @@ def make_frame_builder(item: dict, script: str, duration: float):
             fill=(220, 230, 245, 255)
         )
 
-        # Animated sound bars
+        # Sound bars
         cx = W // 2
 
         for i in range(8):
@@ -488,7 +498,7 @@ def make_frame_builder(item: dict, script: str, duration: float):
                 fill=(255, 255, 255, 80)
             )
 
-        # Caption panel
+        # Captions
         cap = caption_at(t)
         cap_lines = wrap_lines(cap, cap_font, 900)[:4]
 
@@ -531,7 +541,7 @@ def make_frame_builder(item: dict, script: str, duration: float):
 
         draw.text(
             (95, 1810),
-            "Original short news brief • No logos • Verify developing stories",
+            "Original short news brief • No copied logos • Verify developing stories",
             font=tiny_font,
             fill=(225, 235, 250, 230)
         )
@@ -590,6 +600,8 @@ def create_video(item: dict, script: str, audio_path: Path) -> Path:
 # ===================== MAIN =====================
 
 async def main():
+    prepare_folders()
+
     state = load_state()
 
     items = fetch_items()
@@ -597,7 +609,7 @@ async def main():
 
     if not picked:
         print("No fresh unused RSS item found.")
-        print("Try adding more RSS feeds or clearing old state.")
+        print("Try adding more RSS feeds or clear old state.json.")
         return
 
     made = []
