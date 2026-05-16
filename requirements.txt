@@ -1,6 +1,6 @@
-RSS
-feed
-metadata
-where content came from
-visual from RSS
-source credited
+feedparser
+requests
+Pillow
+moviepy==1.0.3
+edge-tts
+numpy
