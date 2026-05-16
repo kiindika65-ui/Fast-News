@@ -6,6 +6,7 @@ import os
 import random
 import re
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -29,7 +30,9 @@ VIDEO_SECONDS_MAX = int(os.getenv("VIDEO_SECONDS_MAX", "55"))
 MAX_OLD_ITEMS = int(os.getenv("MAX_OLD_ITEMS", "1000"))
 MAX_VIDEOS_PER_RUN = int(os.getenv("MAX_VIDEOS_PER_RUN", "1"))
 
-USE_RSS_IMAGES = os.getenv("USE_RSS_IMAGES", "true").lower() == "true"
+# true = use image if the news item provides one
+# false = safest mode, generated background only
+USE_NEWS_IMAGES = os.getenv("USE_NEWS_IMAGES", "true").lower() == "true"
 
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 ASSET_DIR = Path(os.getenv("ASSET_DIR", "assets"))
@@ -38,7 +41,7 @@ STATE_FILE = Path(os.getenv("STATE_FILE", "state.json"))
 FPS = int(os.getenv("FPS", "24"))
 W, H = 1080, 1920
 
-RSS_FEEDS = [
+NEWS_FEEDS = [
     "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
     "https://news.google.com/rss/headlines/section/topic/NATION?hl=en-US&gl=US&ceid=US:en",
     "https://news.google.com/rss/headlines/section/topic/WORLD?hl=en-US&gl=US&ceid=US:en",
@@ -65,7 +68,7 @@ BANNED_TITLE_WORDS = [
 
 
 # ============================================================
-# FOLDER FIX
+# FOLDERS
 # ============================================================
 
 def prepare_folders():
@@ -90,6 +93,7 @@ def load_state() -> dict:
 
 def save_state(state: dict):
     state["used"] = state.get("used", [])[-MAX_OLD_ITEMS:]
+
     STATE_FILE.write_text(
         json.dumps(state, indent=2, ensure_ascii=False),
         encoding="utf-8"
@@ -120,7 +124,7 @@ def source_from_entry(entry) -> str:
     if not source:
         link = getattr(entry, "link", "")
         host = urlparse(link).netloc.replace("www.", "")
-        source = host.split(".")[0].title() if host else "RSS News"
+        source = host.split(".")[0].title() if host else "News Update"
 
     return clean_text(source)[:50]
 
@@ -128,8 +132,10 @@ def source_from_entry(entry) -> str:
 def strip_google_source(title: str):
     if " - " in title:
         headline, source = title.rsplit(" - ", 1)
+
         if len(headline) > 12:
             return headline.strip(), source.strip()
+
     return title.strip(), ""
 
 
@@ -151,7 +157,7 @@ def is_good_item(title: str, summary: str) -> bool:
 
 
 # ============================================================
-# GET IMAGE ONLY FROM RSS ITEM
+# IMAGE FROM NEWS ITEM ONLY
 # ============================================================
 
 def extract_first_image_from_html(text: str) -> str:
@@ -166,37 +172,47 @@ def extract_first_image_from_html(text: str) -> str:
     return ""
 
 
-def get_rss_image_url(entry) -> str:
+def get_news_image_url(entry) -> str:
     """
-    Only extracts image URL if the RSS item itself provides it.
-    No external search.
-    No stock site.
+    Uses only image/media URLs already included inside the news item.
+    It does not search or use stock websites.
     """
     try:
         media_content = getattr(entry, "media_content", [])
+
         if media_content:
             for media in media_content:
                 url = media.get("url", "")
                 medium = media.get("medium", "")
-                if url and ("image" in medium.lower() or url.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
+
+                if url and (
+                    "image" in medium.lower()
+                    or url.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+                ):
                     return url
+
                 if url:
                     return url
+
     except Exception:
         pass
 
     try:
         media_thumbnail = getattr(entry, "media_thumbnail", [])
+
         if media_thumbnail:
             for media in media_thumbnail:
                 url = media.get("url", "")
+
                 if url:
                     return url
+
     except Exception:
         pass
 
     try:
         links = getattr(entry, "links", [])
+
         for link in links:
             href = link.get("href", "")
             link_type = link.get("type", "")
@@ -208,6 +224,7 @@ def get_rss_image_url(entry) -> str:
                 or href.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
             ):
                 return href
+
     except Exception:
         pass
 
@@ -233,7 +250,7 @@ def get_rss_image_url(entry) -> str:
     return ""
 
 
-def download_rss_image(image_url: str, item_id_value: str) -> Path | None:
+def download_news_image(image_url: str, item_id_value: str) -> Path | None:
     if not image_url:
         return None
 
@@ -241,7 +258,7 @@ def download_rss_image(image_url: str, item_id_value: str) -> Path | None:
         return None
 
     headers = {
-        "User-Agent": "WorldPulseDailyBot/3.0"
+        "User-Agent": "WorldPulseDailyBot/4.0"
     }
 
     try:
@@ -250,10 +267,12 @@ def download_rss_image(image_url: str, item_id_value: str) -> Path | None:
 
         content_type = response.headers.get("content-type", "").lower()
 
-        if "image" not in content_type and not image_url.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+        if "image" not in content_type and not image_url.lower().endswith(
+            (".jpg", ".jpeg", ".png", ".webp")
+        ):
             return None
 
-        image_path = ASSET_DIR / f"rss_image_{item_id_value}.jpg"
+        image_path = ASSET_DIR / f"news_image_{item_id_value}.jpg"
 
         image = Image.open(BytesIO(response.content)).convert("RGB")
         image.save(image_path, "JPEG", quality=92)
@@ -261,25 +280,21 @@ def download_rss_image(image_url: str, item_id_value: str) -> Path | None:
         return image_path
 
     except Exception as e:
-        print(f"RSS image download failed: {e}")
+        print(f"Image download failed: {e}")
         return None
 
 
-# BytesIO import fallback placed here to keep imports clean
-from io import BytesIO
-
-
 # ============================================================
-# RSS FETCH
+# NEWS FETCH
 # ============================================================
 
 def fetch_items() -> list[dict]:
     items = []
-    feeds = RSS_FEEDS[:]
+    feeds = NEWS_FEEDS[:]
     random.shuffle(feeds)
 
     headers = {
-        "User-Agent": "WorldPulseDailyBot/3.0"
+        "User-Agent": "WorldPulseDailyBot/4.0"
     }
 
     for feed_url in feeds:
@@ -287,8 +302,9 @@ def fetch_items() -> list[dict]:
             response = requests.get(feed_url, headers=headers, timeout=25)
             response.raise_for_status()
             parsed = feedparser.parse(response.content)
+
         except Exception as e:
-            print(f"Feed failed: {feed_url} -> {e}")
+            print(f"News source failed: {feed_url} -> {e}")
             continue
 
         for entry in parsed.entries[:25]:
@@ -305,7 +321,7 @@ def fetch_items() -> list[dict]:
             if not is_good_item(title, summary):
                 continue
 
-            image_url = get_rss_image_url(entry)
+            image_url = get_news_image_url(entry)
             uid = item_id(title, link)
 
             items.append({
@@ -315,7 +331,7 @@ def fetch_items() -> list[dict]:
                 "link": link,
                 "source": source,
                 "image_url": image_url,
-                "feed": feed_url,
+                "origin": feed_url,
             })
 
     random.shuffle(items)
@@ -328,7 +344,11 @@ def pick_new_items(items: list[dict], state: dict, count: int) -> list[dict]:
     seen_titles = set()
 
     for item in items:
-        title_key = re.sub(r"[^a-z0-9]+", " ", item["title"].lower()).strip()[:100]
+        title_key = re.sub(
+            r"[^a-z0-9]+",
+            " ",
+            item["title"].lower()
+        ).strip()[:100]
 
         if item["id"] in used:
             continue
@@ -346,13 +366,13 @@ def pick_new_items(items: list[dict], state: dict, count: int) -> list[dict]:
 
 
 # ============================================================
-# ORIGINAL NEWS SCRIPT
+# ORIGINAL SCRIPT
 # ============================================================
 
 def make_original_script(item: dict) -> str:
     title = item["title"].strip(" .")
     summary = item.get("summary", "").strip(" .")
-    source = item.get("source", "RSS source")
+    source = item.get("source", "news source")
 
     summary = clean_text(summary)
 
@@ -361,16 +381,17 @@ def make_original_script(item: dict) -> str:
 
     openers = [
         "This is World Pulse Daily with a quick news update.",
-        "Here is a fast update from the latest news feed.",
+        "Here is a fast update on a developing story.",
         "A new headline is now getting attention across the news cycle.",
-        "This is a short news brief based on the latest RSS update.",
+        "This is a short news brief with the key details.",
+        "Here is what viewers need to know right now.",
     ]
 
     middles = [
         f"The main headline is this: {title}.",
-        f"Reports from {source} are focusing on this development: {title}.",
+        f"Reports are focusing on this development: {title}.",
         f"The key update now being reported is: {title}.",
-        f"According to the latest RSS item from {source}, the story centers on this: {title}.",
+        f"The story centers on this: {title}.",
     ]
 
     context = ""
@@ -380,13 +401,14 @@ def make_original_script(item: dict) -> str:
 
     safety_line = (
         "Some details may change as more information becomes available, "
-        "so viewers should check the original source for the newest update."
+        "so viewers should check trusted news sources for the newest update."
     )
 
     closers = [
         "We will continue watching for clearer and more reliable updates.",
         "This is a developing story, and verified details may change later.",
         "Follow trusted sources before sharing developing claims.",
+        "Stay with World Pulse Daily for more updates.",
     ]
 
     script = (
@@ -398,6 +420,7 @@ def make_original_script(item: dict) -> str:
     )
 
     script = clean_text(script)
+
     words = script.split()
 
     if len(words) > 125:
@@ -460,6 +483,7 @@ def wrap_lines(text: str, font, max_width: int) -> list[str]:
         else:
             if line:
                 lines.append(line)
+
             line = word
 
     if line:
@@ -509,14 +533,14 @@ def make_generated_news_background(seed: int) -> Image.Image:
     im = Image.fromarray(img, "RGB").convert("RGBA")
     draw = ImageDraw.Draw(im)
 
-    # Subtle map/grid style lines
+    # Professional abstract grid
     for x in range(-300, W + 300, 120):
         draw.line((x, 0, x + 400, H), fill=(255, 255, 255, 18), width=2)
 
-    for y in range(0, H, 120):
-        draw.line((0, y, W, y), fill=(255, 255, 255, 14), width=1)
+    for y_pos in range(0, H, 120):
+        draw.line((0, y_pos, W, y_pos), fill=(255, 255, 255, 14), width=1)
 
-    # Soft circles
+    # Soft light movement look
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(overlay)
 
@@ -525,7 +549,11 @@ def make_generated_news_background(seed: int) -> Image.Image:
         y0 = random.randint(-250, H)
         r = random.randint(160, 460)
         alpha = random.randint(12, 42)
-        d.ellipse((x, y0, x + r, y0 + r), fill=(255, 255, 255, alpha))
+
+        d.ellipse(
+            (x, y0, x + r, y0 + r),
+            fill=(255, 255, 255, alpha)
+        )
 
     overlay = overlay.filter(ImageFilter.GaussianBlur(30))
 
@@ -533,7 +561,12 @@ def make_generated_news_background(seed: int) -> Image.Image:
     return im.convert("RGB")
 
 
-def cover_resize_image(img: Image.Image, width: int, height: int, zoom: float = 1.0) -> Image.Image:
+def cover_resize_image(
+    img: Image.Image,
+    width: int,
+    height: int,
+    zoom: float = 1.0
+) -> Image.Image:
     img = ImageOps.exif_transpose(img).convert("RGB")
 
     iw, ih = img.size
@@ -558,7 +591,12 @@ def cover_resize_image(img: Image.Image, width: int, height: int, zoom: float = 
     return img.crop((left, top, left + width, top + height))
 
 
-def make_image_background(image_path: Path | None, seed: int, t: float, duration: float) -> Image.Image:
+def make_image_background(
+    image_path: Path | None,
+    seed: int,
+    t: float,
+    duration: float
+) -> Image.Image:
     if image_path and image_path.exists():
         try:
             img = Image.open(image_path).convert("RGB")
@@ -568,9 +606,11 @@ def make_image_background(image_path: Path | None, seed: int, t: float, duration
 
             dark = Image.new("RGBA", (W, H), (0, 0, 0, 120))
             bg = Image.alpha_composite(bg.convert("RGBA"), dark).convert("RGB")
+
             return bg
+
         except Exception as e:
-            print(f"Could not use RSS image: {e}")
+            print(f"Could not use image: {e}")
 
     return make_generated_news_background(seed)
 
@@ -579,7 +619,12 @@ def make_image_background(image_path: Path | None, seed: int, t: float, duration
 # VIDEO CREATION
 # ============================================================
 
-def make_frame_builder(item: dict, script: str, duration: float, image_path: Path | None):
+def make_frame_builder(
+    item: dict,
+    script: str,
+    duration: float,
+    image_path: Path | None
+):
     title_font = get_font(56, True)
     caption_font = get_font(50, True)
     brand_font = get_font(38, True)
@@ -588,7 +633,6 @@ def make_frame_builder(item: dict, script: str, duration: float, image_path: Pat
     tiny_font = get_font(26, False)
 
     title = item["title"]
-    source = item.get("source", "RSS source")
 
     title_lines = wrap_lines(title, title_font, 900)[:4]
 
@@ -624,6 +668,7 @@ def make_frame_builder(item: dict, script: str, duration: float, image_path: Pat
 
         for yy in range(420):
             alpha = int(200 * (1 - yy / 420))
+
             for xx in range(W):
                 top_px[xx, yy] = (0, 0, 0, alpha)
 
@@ -634,6 +679,7 @@ def make_frame_builder(item: dict, script: str, duration: float, image_path: Pat
 
         for yy in range(760):
             alpha = int(230 * (yy / 760))
+
             for xx in range(W):
                 bottom_px[xx, yy] = (0, 0, 0, alpha)
 
@@ -674,13 +720,13 @@ def make_frame_builder(item: dict, script: str, duration: float, image_path: Pat
         )
 
         draw.text(
-            (798, 89),
-            "RSS NEWS",
+            (792, 89),
+            "NEWS UPDATE",
             font=tiny_font,
             fill=(255, 255, 255, 255)
         )
 
-        # Top story label
+        # Story label
         draw_round_rect(
             draw,
             (60, 895, 355, 970),
@@ -718,7 +764,7 @@ def make_frame_builder(item: dict, script: str, duration: float, image_path: Pat
 
         draw.text(
             (85, 1250),
-            f"Source: {source}"[:70],
+            "Developing story",
             font=small_font,
             fill=(220, 230, 245, 235)
         )
@@ -762,11 +808,7 @@ def make_frame_builder(item: dict, script: str, duration: float, image_path: Pat
             fill=(185, 20, 32, 245)
         )
 
-        # Footer
-        footer = "Original brief from RSS metadata • No stock websites • Verify developing stories"
-
-        if USE_RSS_IMAGES and item.get("image_url"):
-            footer = "Visual from RSS item if available • Source credited • Verify developing stories"
+        footer = "Breaking updates • Clear news briefs • Follow for more"
 
         draw.text(
             (65, 1810),
@@ -785,7 +827,12 @@ def safe_filename(text: str) -> str:
     return text[:75] or "news_video"
 
 
-def create_video(item: dict, script: str, audio_path: Path, image_path: Path | None) -> Path:
+def create_video(
+    item: dict,
+    script: str,
+    audio_path: Path,
+    image_path: Path | None
+) -> Path:
     audio = AudioFileClip(str(audio_path))
 
     duration = min(
@@ -840,8 +887,8 @@ async def main():
     picked = pick_new_items(items, state, MAX_VIDEOS_PER_RUN)
 
     if not picked:
-        print("No fresh unused RSS item found.")
-        print("Try adding more RSS feeds or clear state.json.")
+        print("No fresh unused news item found.")
+        print("Try adding more news sources or clear state.json.")
         return
 
     made = []
@@ -850,7 +897,6 @@ async def main():
         print("TITLE:", item["title"])
         print("SOURCE:", item["source"])
         print("LINK:", item["link"])
-        print("RSS IMAGE:", item.get("image_url", ""))
 
         script = make_original_script(item)
 
@@ -862,8 +908,8 @@ async def main():
 
         image_path = None
 
-        if USE_RSS_IMAGES and item.get("image_url"):
-            image_path = download_rss_image(item["image_url"], item["id"])
+        if USE_NEWS_IMAGES and item.get("image_url"):
+            image_path = download_news_image(item["image_url"], item["id"])
 
         video_path = create_video(
             item=item,
@@ -879,12 +925,10 @@ async def main():
             "title": item["title"],
             "source": item["source"],
             "link": item["link"],
-            "rss_image_url": item.get("image_url", ""),
-            "used_rss_image": str(image_path) if image_path else None,
+            "used_image": str(image_path) if image_path else None,
             "script": script,
             "video": str(video_path),
             "created_utc": datetime.now(timezone.utc).isoformat(),
-            "note": "Video generated only from RSS metadata and RSS-provided image if available.",
         }
 
         video_path.with_suffix(".json").write_text(
